@@ -1,0 +1,15 @@
+https://www.acwing.com/blog/content/36584/
+
+usertrap
+
+7 SYS_exec
+
+0 用户态
+
+panic的汇编指令lw a3,0(zero) # 0x0 a3
+
+由于虚拟地址0未映射到任何的物理地址，故加载指令(lw)不能翻译虚拟地址0, 导致load页故障。
+该页故障异常发生在内核中，xv6没有对内核态下的异常进行处理，故导致直接崩溃。
+报错 0xd Load page fault
+
+name = "initcode\000\000\000\000\000\000\000" pid = 1
