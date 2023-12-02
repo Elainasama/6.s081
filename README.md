@@ -6,3 +6,5 @@
 - 中文翻译仓库地址： https://github.com/huihongxiao/MIT6.S081
 - xv6中文文档: https://th0ar.gitbooks.io/xv6-chinese/content/index.html
 - OSTEP操作系统导论：https://pages.cs.wisc.edu/~remzi/OSTEP/
+
+各实验详情可见各独立分支
