@@ -132,6 +132,12 @@ found:
     return 0;
   }
 
+  if ((p->us = (struct usyscall *)kalloc()) == 0){
+      freeproc(p);
+      release((&p->lock));
+      return 0;
+  }
+  p->us->pid = p->pid;
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -160,6 +166,10 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if(p->us){
+      kfree((void *)p->us);
+  }
+  p->us = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -201,7 +211,12 @@ proc_pagetable(struct proc *p)
     uvmfree(pagetable, 0);
     return 0;
   }
-
+  // 需要注意的是这里不能只设置PTE_R位，因为用户需要访问该物理页，所以还需要设置PTE_U位。
+  if (mappages(pagetable,USYSCALL,PGSIZE,(uint64)p -> us,PTE_R|PTE_U) < 0){
+      uvmunmap(pagetable, USYSCALL, 1, 0);
+      uvmfree(pagetable, 0);
+      return 0;
+  };
   return pagetable;
 }
 
@@ -212,6 +227,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable,USYSCALL,1,0);
   uvmfree(pagetable, sz);
 }
 

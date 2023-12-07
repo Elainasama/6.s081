@@ -72,10 +72,41 @@ sys_sleep(void)
 
 #ifdef LAB_PGTBL
 int
-sys_pgaccess(void)
-{
-  // lab pgtbl: your code here.
-  return 0;
+sys_pgaccess(void){
+    // lab pgtbl: your code here.
+    uint64 vmstart;
+    int n;
+    uint64 p;
+    argaddr(0,&vmstart);
+    argint(1,&n);
+    if (n > 32){
+        panic("pgaccess:page num too large");
+    }
+    argaddr(2,&p);
+//    vmprint(myproc()->pagetable);
+    uint64 mask = 0;
+    for (int i = 0; i < n; ++i) {
+        uint64 va = vmstart + i * PGSIZE;
+        if (va >= MAXVA){
+            panic("pgaccess");
+        }
+        pte_t *pte;
+        pagetable_t pagetable = myproc()->pagetable;
+        for (int level = 2; level > 0; --level) {
+            pte = &pagetable[PX(level,va)];
+            if (*pte & PTE_V){
+                pagetable = (pagetable_t)PTE2PA(*pte);
+            }
+        }
+        pte = &pagetable[PX(0,va)];
+        if (*pte & PTE_A){
+            mask |= (1 << i);
+            *pte ^= PTE_A;
+        }
+    }
+    if(copyout(myproc()->pagetable, p, (char *)&mask, sizeof(mask)) < 0)
+        return -1;
+    return 0;
 }
 #endif
 
@@ -100,3 +131,4 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
