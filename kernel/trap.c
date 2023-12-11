@@ -77,10 +77,45 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
-
+  if(which_dev == 2) {
+      // 定时器中断时调度,要判断当前是否在调用中 不重复调用。
+      if (!p -> flag && p -> nticks != 0){
+          p -> tickcount++;
+          if (p -> tickcount == p->nticks){
+              p -> tickcount = 0;
+              p -> flag = 1;
+              // 查询 alarmtest.asm 可以看到寄存器使用情况
+              // 为了方便直接全部复制了
+//              printf("%p %p\n",p->trapframe->epc,p->savetrapframe->epc);
+//              printf("%p %p\n",p->trapframe->ra,p->savetrapframe->ra);
+              memcopy(p->savetrapframe,p->trapframe,sizeof(struct trapframe));
+              p->trapframe->epc = p -> handler;
+//              printf("%p %p\n",p->trapframe->epc,p->savetrapframe->epc);
+//              printf("%p %p\n",p->trapframe->ra,p->savetrapframe->ra);
+          }
+//      printf("%d\n",p->tickcount);
+      }
+      yield();
+  }
   usertrapret();
+}
+
+// 直接复制一段空间上的值
+void* memcopy(void* dest,void* src,int n){
+    char * cdest = (char *) dest;
+    const char * csrc = (const char *) src;
+    for(int i = 0;i < n;i++){
+        cdest[i] = csrc[i];
+    }
+    return dest;
+}
+
+uint64 sys_sigreturn(void){
+    struct proc *p = myproc();
+    memcopy(p->trapframe,p->savetrapframe,sizeof(struct trapframe));
+    p -> flag = 0;
+    // 系统调用的返回值会在syscall中写入p->trapframe->a0
+    return p -> savetrapframe -> a0;
 }
 
 //
