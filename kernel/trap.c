@@ -67,7 +67,42 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if (r_scause() == 15){
+        uint64 va = r_stval();
+        if (va >= MAXVA){
+            goto err;
+        }
+//        printf("page fault %p\n",r_stval());
+        pte_t* pte = walk(p -> pagetable,va,0);
+        // 非cow页发生的写错误，正常处理错误信息。
+        if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0){
+            goto err;
+        }else{
+            uint64 pa = PTE2PA(*pte);
+            if (getRefCount(pa) > 1){
+                // 原本只读的页面（未映射PTE_W， 类似文本段中的页面）应保持只读状态
+                uint64 flags = PTE_FLAGS(*pte) ^ PTE_COW;
+                char* ka = (char*) kalloc();
+                if (ka == 0){
+                    setkilled(p);
+                }else{
+                    uint64 pa = PTE2PA(*pte);
+                    memmove(ka, (char*)pa, PGSIZE);
+                    va = PGROUNDDOWN(va);
+                    uvmunmap(p -> pagetable,va,1,1);
+                    if (mappages(p -> pagetable,va,PGSIZE,(uint64) ka,flags | PTE_W) != 0){
+                        kfree((void *)ka);
+                        setkilled(p);
+                    }
+                }
+            }else{
+                // 只剩一个进程引用，从共享读回复到原有状态。
+                *pte |= PTE_W;
+                *pte ^= PTE_COW;
+            }
+        }
+  }else {
+  err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
