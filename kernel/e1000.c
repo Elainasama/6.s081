@@ -12,10 +12,12 @@
 static struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
 static struct mbuf *tx_mbufs[TX_RING_SIZE];
 
+struct spinlock TX_RING_LOCK;
+
 #define RX_RING_SIZE 16
 static struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 static struct mbuf *rx_mbufs[RX_RING_SIZE];
-
+struct spinlock RX_RING_LOCK;
 // remember where the e1000's registers live.
 static volatile uint32 *regs;
 
@@ -30,7 +32,8 @@ e1000_init(uint32 *xregs)
   int i;
 
   initlock(&e1000_lock, "e1000");
-
+  initlock(&TX_RING_LOCK,"tx_ring");
+  initlock(&RX_RING_LOCK,"rx_ring");
   regs = xregs;
 
   // Reset the device
@@ -102,7 +105,24 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  acquire(&TX_RING_LOCK);
+  // printf("transmit start!!!\n");
+  uint32 idx = regs[E1000_TDT];
+  // 查看该索引是否完成了先前运输，否则不可覆写。传输完成后打上标记
+  if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+      release(&TX_RING_LOCK);
+      return -1;
+  }
+  // 使用mbuffree()释放从该描述符传输的最后一个mbuf（如果有）
+  if (tx_mbufs[idx] != 0){
+      mbuffree(tx_mbufs[idx]);
+  }
+  tx_ring[idx].addr = (uint64) m -> head;
+  tx_ring[idx].length = m -> len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_mbufs[idx] = m;
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+  release(&TX_RING_LOCK);
   return 0;
 }
 
@@ -115,6 +135,29 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  // 扫描 RX 环并通过调用net_rx()将每个新数据包的mbuf传递到网络堆栈
+  acquire(&RX_RING_LOCK);
+  while (1){
+//      printf("recv start!!!\n");
+      uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+      if ((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0){
+          release(&RX_RING_LOCK);
+          return;
+      }
+      rx_mbufs[idx] -> len = rx_ring[idx].length;
+      net_rx(rx_mbufs[idx]);
+      // 设置空包，表示运输完成。
+      struct mbuf * m = mbufalloc(0);
+      if (m == 0){
+          release(&RX_RING_LOCK);
+          return;
+      }
+      rx_mbufs[idx] = m;
+      rx_ring[idx].addr = (uint64) m -> head;
+      rx_ring[idx].status = 0;
+      regs[E1000_RDT] = idx;
+  }
+    release(&RX_RING_LOCK);
 }
 
 void
