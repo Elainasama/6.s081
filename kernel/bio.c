@@ -23,33 +23,37 @@
 #include "fs.h"
 #include "buf.h"
 
+#define BucketSize 17
+// 结构体的定义发生在编译时期，而const int变量是在运行时期才有确定的值。
+// 因此，编译器无法在编译时期确定结构体数组的大小，因为它依赖于在运行时期才能得到的const int变量的值。
+// const int BucketSize = 13;
 struct {
   struct spinlock lock;
-  struct buf buf[NBUF];
+  struct buf buf[MAXOPBLOCKS];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
   struct buf head;
-} bcache;
+} bcache[BucketSize];
 
 void
 binit(void)
 {
-  struct buf *b;
-
-  initlock(&bcache.lock, "bcache");
-
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
+    struct buf *b;
+    for (int i = 0; i < BucketSize; ++i) {
+        initlock(&bcache[i].lock, "bcache");
+        // Create linked list of buffers
+        bcache[i].head.prev = &bcache[i].head;
+        bcache[i].head.next = &bcache[i].head;
+        for(b = bcache[i].buf; b < bcache[i].buf+MAXOPBLOCKS; b++){
+            b->next = bcache[i].head.next;
+            b->prev = &bcache[i].head;
+            initsleeplock(&b->lock, "buffer");
+            bcache[i].head.next->prev = b;
+            bcache[i].head.next = b;
+        }
+    }
 }
 
 // Look through buffer cache for block on device dev.
@@ -59,14 +63,14 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
-
-  acquire(&bcache.lock);
+  int id = (dev + blockno) % BucketSize;
+  acquire(&bcache[id].lock);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bcache[id].head.next; b != &bcache[id].head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache[id].lock);
       acquiresleep(&b->lock);
       return b;
     }
@@ -74,13 +78,13 @@ bget(uint dev, uint blockno)
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+  for(b = bcache[id].head.prev; b != &bcache[id].head; b = b->prev){
     if(b->refcnt == 0) {
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
-      release(&bcache.lock);
+      release(&bcache[id].lock);
       acquiresleep(&b->lock);
       return b;
     }
@@ -120,34 +124,36 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
-
-  acquire(&bcache.lock);
+  int id = (b->dev + b->blockno) % BucketSize;
+  acquire(&bcache[id].lock);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->next = bcache[id].head.next;
+    b->prev = &bcache[id].head;
+    bcache[id].head.next->prev = b;
+    bcache[id].head.next = b;
   }
   
-  release(&bcache.lock);
+  release(&bcache[id].lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+    int id = (b->dev + b->blockno) % BucketSize;
+  acquire(&bcache[id].lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache[id].lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+    int id = (b->dev + b->blockno) % BucketSize;
+  acquire(&bcache[id].lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache[id].lock);
 }
 
 
