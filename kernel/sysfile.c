@@ -315,14 +315,14 @@ sys_open(void)
     return -1;
 
   begin_op();
-
+  // 打开并锁上一个文件
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
       return -1;
     }
-  } else {
+  }else {
     if((ip = namei(path)) == 0){
       end_op();
       return -1;
@@ -340,7 +340,31 @@ sys_open(void)
     end_op();
     return -1;
   }
-
+  // nofollow标志位表示直接指向该文件，否则就需要经过软链接指引。
+  if ((omode & O_NOFOLLOW) == 0){
+      int times = 10;
+      while (times){
+//        printf("ip -> type %d\n",ip -> type);
+//        printf("ip -> name %s\n",path);
+          if (ip -> type == T_SYMLINK){
+              readi(ip,0,(uint64)path,0,MAXPATH);
+              iunlockput(ip);
+              if ((ip = namei(path)) == 0){
+                    end_op();
+                    return -1;
+              }
+              ilock(ip);
+          }else{
+              break;
+          }
+          times--;
+      }
+      if (times == 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+      }
+  }
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -502,4 +526,32 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 sys_symlink(void){
+    char path[MAXPATH], target[MAXPATH];
+    struct inode *ip;
+
+    if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+        return -1;
+    begin_op();
+    if ((ip = namei(path)) != 0){
+        end_op();
+        return -1;
+    }
+    // create返回一个带锁的文件，需要手动解锁。
+    if ((ip = create(path,T_SYMLINK,0,0)) == 0){
+        end_op();
+        return -1;
+    }
+
+    if (writei(ip,0,(uint64)target,0,MAXPATH) < 0){
+        iunlockput(ip);
+        end_op();
+        return -1;
+    }
+
+    iunlockput(ip);
+    end_op();
+    return 0;
 }
