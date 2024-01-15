@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,7 +71,63 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if(r_scause() == 13){
+    // 页面错误
+    uint64 va = r_stval();
+    if (va >= MAXVA){
+        goto err;
+    }
+    struct proc * p = myproc();
+    int i = 0;
+    for (;i < VMASIZE; ++i) {
+        if (p->vma[i].value == 0){
+            continue;
+        }
+         if (p -> vma[i].addr <= va && va < p -> vma[i].addr + PGROUNDUP(p->vma[i].length)){
+             break;
+         }
+    }
+    if (i == VMASIZE){
+        goto err;
+    }
+    struct inode* ip = p->vma[i].ofile->ip;
+    ilock(ip);
+    void * ka = kalloc();
+//    char buf[512];
+//    readi(ip,0,(uint64)buf,0,100);
+//    printf(buf);
+    if (ka == 0){
+        iunlock(ip);
+        setkilled(p);
+    }else{
+        va = PGROUNDDOWN(va);
+        memset(ka,0,PGSIZE);
+        uint64 offset = va - p->vma[i].addr + p->vma[i].offset;
+        uint64 len = PGSIZE;
+        if (p->vma[i].length - (va - p->vma[i].addr) < len){
+            len = p->vma[i].length - (va - p->vma[i].addr);
+        }
+        readi(ip,0,(uint64)ka,offset,len);
+        // 访问权限位
+        uint64 flag = PTE_U;
+        if (p->vma[i].prot & PROT_READ){
+            flag |= PTE_R;
+        }
+        if (p->vma[i].prot & PROT_WRITE){
+            flag |= PTE_W;
+        }
+        if (p->vma[i].prot & PROT_EXEC){
+            flag |= PTE_X;
+        }
+        if (mappages(p -> pagetable,va,PGSIZE,(uint64) ka,flag) != 0){
+            kfree((void *)ka);
+            iunlock(ip);
+            setkilled(p);
+        }
+    }
+    iunlock(ip);
+  }else {
+  err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);

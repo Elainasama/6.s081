@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -308,6 +312,22 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 复制VMA表
+  for (int i = 0; i < VMASIZE; ++i) {
+      if (p->vma[i].value == 1){
+          np->vma[i].value = 1;
+          np->vma[i].ofile = p->vma[i].ofile;
+          // 增加引用计数
+          filedup(p->vma[i].ofile);
+          np->vma[i].addr = p->vma[i].addr;
+          np->vma[i].length = p->vma[i].length;
+          np->vma[i].prot = p->vma[i].prot;
+          np->vma[i].flags = p->vma[i].flags;
+          np->vma[i].offset = p->vma[i].offset;
+          np->vma[i].npage = p->vma[i].npage;
+      }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,7 +370,36 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
-
+  // 取消所有VMA区域映射
+    for (int i = 0; i < VMASIZE; ++i) {
+        if (p->vma[i].value){
+            p->vma[i].value = 0;
+            pte_t * pte;
+            for (uint64 va = PGROUNDDOWN(p->vma[i].addr); va < p->vma[i].addr + PGROUNDUP(p->vma[i].length); va += PGSIZE) {
+                // 检查该地址是否存在,存在就去掉。
+                if ((pte = walk(p->pagetable,va,0)) != 0){
+                    // 实验中存在未读取映射然后直接取消的情况，要检查权限位。
+                    if (*pte & PTE_V){
+                        // 写回原文件,调用writei。
+                        if (p->vma[i].flags & MAP_SHARED){
+                            struct inode* ip = p->vma[i].ofile->ip;
+                            begin_op();
+                            ilock(ip);
+                            uint64 offset = va - p->vma[i].addr + p->vma[i].offset;
+                            uint64 len = PGSIZE;
+                            if (p->vma[i].length - (va - p->vma[i].addr) < len){
+                                len = p->vma[i].length - (va - p->vma[i].addr);
+                            }
+                            writei(ip,1,va,offset,len);
+                            iunlock(ip);
+                            end_op();
+                        }
+                        uvmunmap(p->pagetable,va,1,1);
+                    }
+                }
+            }
+        }
+    }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -680,4 +729,102 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64 sys_mmap(void){
+    struct proc* p = myproc();
+    uint64 addr,length,offset;
+    int prot,flags,fd;
+    argaddr(0,&addr);
+    argaddr(1,&length);
+    argint(2,&prot);
+    argint(3,&flags);
+    argint(4,&fd);
+    argaddr(5,&offset);
+    // 检查权限
+    struct file* ofile = p -> ofile[fd];
+    if ((flags == MAP_SHARED) && (((prot & PROT_READ) != 0 && ofile->readable == 0)|| ((prot & PROT_WRITE) != 0 && ofile->writable == 0))){
+        return -1;
+    }
+    for (int i = 0; i < VMASIZE; ++i) {
+        if (p->vma[i].value == 0){
+            p->vma[i].ofile = ofile;
+            // 增加引用计数
+            filedup(ofile);
+            if (addr != 0){
+                p->vma[i].addr = addr;
+            }else{
+                if (p->sz + PGROUNDUP(length) > MAXVA){
+                    return -1;
+                }
+                p->vma[i].npage = PGROUNDUP(length)/PGSIZE;
+                p->vma[i].addr = p -> sz;
+                p->sz += PGROUNDUP(length);
+            }
+            p->vma[i].length = length;
+            p->vma[i].prot = prot;
+            p->vma[i].flags = flags;
+            p->vma[i].value = 1;
+            p->vma[i].offset = offset;
+            return (uint64) p->vma[i].addr;
+        }
+    }
+    return -1;
+}
+
+uint64 sys_munmap(void){
+    struct proc* p = myproc();
+    uint64 addr,length;
+    argaddr(0,&addr);
+    argaddr(1,&length);
+    int i = 0;
+    for (;i < VMASIZE; ++i) {
+        if (p->vma[i].value == 0){
+            continue;
+        }
+        if (p->vma[i].addr <= addr && addr + length <= p->vma[i].addr + PGROUNDUP(p->vma[i].length)){
+            break;
+        }
+    }
+    if (i == VMASIZE){
+        return -1;
+    }
+    // 已经完全释放
+    if (p->vma[i].npage == 0){
+        return 0;
+    }
+    pte_t * pte;
+    for (uint64 va = addr; va < addr + length; va += PGSIZE) {
+        // 检查该地址是否存在,存在就去掉。
+        if ((pte = walk(p->pagetable,va,0)) != 0){
+//            printf("addr:%d\n",va);
+            p->vma[i].npage--;
+            // 实验中存在未读取映射然后直接取消的情况，要检查权限位。
+            if (*pte & PTE_V){
+                // 写回原文件,调用writei。
+                if (p->vma[i].flags & MAP_SHARED){
+                    struct inode* ip = p->vma[i].ofile->ip;
+                    begin_op();
+                    ilock(ip);
+                    uint64 offset = va - p->vma[i].addr + p->vma[i].offset;
+                    uint64 len = PGSIZE;
+                    if (p->vma[i].length - (va - p->vma[i].addr) < len){
+                        len = p->vma[i].length - (va - p->vma[i].addr);
+                    }
+                    writei(ip,1,va,offset,len);
+                    iunlock(ip);
+                    end_op();
+                }
+                uvmunmap(p->pagetable,va,1,1);
+            }
+        }
+    }
+    // 已经完全删除mmap的所有页，此时文件计数减一。
+    // 并且删除VMA
+    if (p->vma[i].npage == 0){
+        fileclose(p->vma[i].ofile);
+        p->vma[i].value = 0;
+    }
+//    printf("npage:%d\n",p->vma[i].npage);
+    return 0;
 }
